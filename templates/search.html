@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "macros.html" import rec_list %}
+{% block content %}
+<h2>Results for "{{ q }}"</h2>
+{% for m in results %}
+  <div class="card">
+    <a href="{{ url_for('movie', movie_id=m.id) }}"><b>{{ m.title }}</b></a> ({{ m.year }})
+    <small>{{ m.genres.replace('|', ', ') }}</small>
+  </div>
+{% else %}
+  <p>No movies found.</p>
+{% endfor %}
+
+{% if results %}
+  <h3>Similar to {{ results[0].title }}</h3>
+  {{ rec_list(recs) }}
+{% endif %}
+{% endblock %}

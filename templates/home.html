@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "macros.html" import rec_list %}
+{% block content %}
+<form method="post" action="{{ url_for('preferences') }}">
+  I care most about:
+  <select name="preference" onchange="this.form.submit()">
+    {% for name in presets %}
+      <option value="{{ name }}" {% if name == pref %}selected{% endif %}>{{ name.title() }}</option>
+    {% endfor %}
+  </select>
+  <noscript><button>Save</button></noscript>
+</form>
+
+<h2>Recommended for you</h2>
+{{ rec_list(recs) }}
+
+<h3>Your history</h3>
+<ul>
+  {% for m in watched %}
+    <li>
+      <a href="{{ url_for('movie', movie_id=m.id) }}">{{ m.title }}</a> ({{ m.year }}) —
+      {% if m.rating %}{{ '★' * m.rating }}{{ '☆' * (5 - m.rating) }}{% else %}not rated{% endif %}
+    </li>
+  {% else %}
+    <li>Nothing yet. Search for a movie and mark it as watched!</li>
+  {% endfor %}
+</ul>
+{% endblock %}

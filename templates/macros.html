@@ -1,0 +1,12 @@
+{% macro rec_list(recs) %}
+  {% for r in recs %}
+    <div class="card">
+      <span class="match">{{ r.match }}% match</span>
+      <a href="{{ url_for('movie', movie_id=r.id) }}"><b>{{ r.title }}</b></a> ({{ r.year }})
+      {% if r.because %}<div><small>Because you liked {{ r.because }}</small></div>{% endif %}
+      {% for reason in r.reasons %}<span class="tag">{{ reason }}</span>{% endfor %}
+    </div>
+  {% else %}
+    <p>No recommendations yet. Watch or search for something!</p>
+  {% endfor %}
+{% endmacro %}

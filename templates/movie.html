@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "macros.html" import rec_list %}
+{% block content %}
+<h2>{{ movie.title }} ({{ movie.year }})</h2>
+<p><b>Genres:</b> {{ movie.genres.replace('|', ', ') }}</p>
+<p><b>Starring:</b> {{ movie.actors.replace('|', ', ') }}</p>
+<p><b>Director:</b> {{ movie.director }}</p>
+<p>{{ movie.plot }}</p>
+
+<form method="post" action="{{ url_for('watch', movie_id=movie.id) }}">
+  {% if watched %}
+    <p>You watched this{% if my_rating %} and rated it {{ my_rating }}/5{% endif %}.</p>
+  {% endif %}
+  <label>Your rating:
+    <select name="rating">
+      <option value="">No rating</option>
+      {% for n in range(5, 0, -1) %}
+        <option value="{{ n }}" {% if n == my_rating %}selected{% endif %}>{{ '★' * n }} ({{ n }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button>{{ 'Update' if watched else 'Mark as watched' }}</button>
+</form>
+
+<h3>More like this</h3>
+{{ rec_list(recs) }}
+{% endblock %}

@@ -1,0 +1,419 @@
+req
+
+I'll put this together as a doc that you can download as a PDF.
+
+I couldn't create the PDF here: Claude Docs can't be made in an Incognito chat because they stay in your account after the chat ends. You can do it in a new chat with Incognito off. In the meantime, here's the full guide. To get a PDF, paste it into Word or Google Docs and choose **File → Download → PDF**.
+
+One quick correction first: **NumPy isn't what turns things into vectors**. scikit-learn does that. NumPy does the math afterwards: weighting, combining, and sorting. The guide explains exactly who does what.
+
+---
+
+# How the Movie Recommender Works
+
+## 1. The big picture
+
+Every recommendation goes through the same pipeline:
+
+```
+MySQL table  →  pandas DataFrame  →  scikit-learn vectors  →  similarity scores
+   (rows)          (a table in          (each movie becomes     (how close two
+                    Python)              a list of numbers)      movies are, 0 to 1)
+
+        →  NumPy weighting & sorting  →  match %  →  Flask shows it in HTML
+```
+
+Which library does what:
+
+| Library | Job | Where |
+|---|---|---|
+| **pandas** | Holds the movie table in Python; cleans and joins the CSV data | `db.py`, `import_tmdb.py`, `recommender.py` |
+| **scikit-learn** | Turns genres, actors and plot text into vectors, and normalizes them | `recommender.py` (`__init__`) |
+| **NumPy** | Multiplies vectors, applies weights, picks the best matches, sorts | `recommender.py` (`_sim_rows`, `for_user`, `_package`) |
+| **json** (built into Python) | Reads the JSON-formatted columns in the Kaggle CSVs | `import_tmdb.py` |
+
+The core idea is that **if two movies can be written as lists of numbers, "similar movies" becomes "lists of numbers that point in the same direction."**
+
+---
+
+## 2. pandas: the table in Python
+
+A **DataFrame** is pandas' version of a table: rows, columns, and column names, just like the MySQL table.
+
+### Loading from MySQL (`db.py`)
+```python
+pd.DataFrame(query("SELECT * FROM movies"))
+```
+`query()` returns a list of dicts, like `[{"id": 27205, "title": "Inception", ...}, ...]`. `pd.DataFrame(...)` turns that list into a table where each dict becomes a row and each key becomes a column.
+
+### Reading the Kaggle files (`import_tmdb.py`)
+```python
+movies = pd.read_csv(MOVIES_CSV)
+credits = pd.read_csv(CREDITS_CSV)
+```
+`read_csv` loads a CSV file straight into a DataFrame.
+
+```python
+df = movies.merge(credits[["movie_id", "cast", "crew"]], left_on="id", right_on="movie_id")
+```
+`merge` is pandas' version of a SQL **JOIN**. It matches `movies.id` with `credits.movie_id`, so each row now has both the plot info and the cast and crew. `credits[["movie_id", "cast", "crew"]]` means "keep only these 3 columns", like `SELECT movie_id, cast, crew`.
+
+```python
+df = df.sort_values("popularity", ascending=False)
+df = df.head(LIMIT)
+```
+These are equivalent to `ORDER BY popularity DESC` and `LIMIT n`.
+
+```python
+for _, r in df.iterrows():
+```
+This loops through rows one by one. `r["title"]` is that row's title.
+
+```python
+pd.to_datetime(r["release_date"], errors="coerce")
+pd.isna(release)
+```
+`to_datetime` converts text like `"2010-07-15"` into a date. `errors="coerce"` means that if the date is broken or missing, pandas returns "missing" (`NaT`) instead of crashing. `pd.isna()` checks whether a value is missing (NaN, NaT or None).
+
+### Cleaning (`recommender.py`)
+```python
+self.df = movies.reset_index(drop=True)
+self.df[col] = self.df[col].fillna("")
+```
+- `reset_index(drop=True)` renumbers rows 0, 1, 2, ... This matters because later we refer to movies by **row number**, not by database id.
+- `fillna("")` replaces missing values with empty text, so scikit-learn doesn't crash on `None`.
+
+```python
+self.idx = {int(mid): i for i, mid in enumerate(self.df["id"])}
+```
+This builds a lookup from **database id → row number**, for example `{27205: 0, 157336: 1, ...}`. The database talks in ids, while the matrices talk in row numbers, and this dictionary translates between them.
+
+```python
+self.df.iloc[i]           # the whole row at position i
+self.df.at[a, "director"] # a single cell: row a, column "director"
+self.df["keywords"].str.replace("|", " ")   # text operation on a whole column at once
+```
+
+---
+
+## 3. scikit-learn: turning text into vectors
+
+A computer can't compare "Action|Sci-Fi" with "Sci-Fi|Drama" directly. It needs numbers, so scikit-learn converts each movie into a **vector**, which is just a list of numbers.
+
+### 3a. CountVectorizer (genres, actors, director)
+
+```python
+vec = CountVectorizer(tokenizer=split_pipe, token_pattern=None, binary=True)
+matrix = vec.fit_transform(self.df["genres"])
+```
+
+- `tokenizer=split_pipe` tells it how to split text into pieces ("tokens"). Our function splits on `|`, so `"Action|Sci-Fi"` becomes `["action", "sci-fi"]`. Without this, "Sci-Fi" would be split into "sci" and "fi", and "Tom Hardy" into "tom" and "hardy".
+- `token_pattern=None` turns off the default word-splitting, since we gave our own tokenizer.
+- `binary=True` stores 1 if the movie has the tag and 0 if not.
+- `fit_transform` does two things. **Fit** collects every distinct tag across all movies (the "vocabulary"). **Transform** writes each movie as a row of 1s and 0s over that vocabulary.
+
+**Example with 3 movies:**
+
+| Movie | Genres |
+|---|---|
+| Inception | Action, Sci-Fi, Thriller |
+| The Matrix | Action, Sci-Fi |
+| Toy Story | Animation, Comedy, Family |
+
+The vocabulary (sorted) is: `action, animation, comedy, family, sci-fi, thriller`
+
+| | action | animation | comedy | family | sci-fi | thriller |
+|---|---|---|---|---|---|---|
+| Inception | 1 | 0 | 0 | 0 | 1 | 1 |
+| The Matrix | 1 | 0 | 0 | 0 | 1 | 0 |
+| Toy Story | 0 | 1 | 1 | 1 | 0 | 0 |
+
+Each row is that movie's genre vector. The same thing happens for actors, where the vocabulary has thousands of names, and for directors.
+
+The result is a **sparse matrix**. Most entries are 0 (a movie has 5 actors out of roughly 20,000 in the vocabulary), so scikit-learn stores only the non-zero entries. This saves a huge amount of memory.
+
+### 3b. TfidfVectorizer (plot + keywords)
+
+For plots, simple 1/0 isn't good enough. If two plots both contain "the" or "man", that means nothing. If both contain "wormhole", that means a lot. **TF-IDF** gives each word a weight:
+
+- **TF (term frequency):** how often the word appears in *this* plot.
+- **IDF (inverse document frequency):** how *rare* the word is across *all* plots. Rare words get a high score; common words get a low one.
+- **TF-IDF = TF × IDF.** Words that are frequent in this movie but rare overall get the highest weight.
+
+```python
+plot_text = self.df["plot"] + " " + self.df["keywords"].str.replace("|", " ")
+tfidf = TfidfVectorizer(stop_words="english", max_features=20000)
+self.features["plot"] = tfidf.fit_transform(plot_text)
+```
+
+- The plot and the TMDB keywords are joined into one text, because keywords like "dream", "heist" or "time travel" are very informative.
+- `stop_words="english"` removes words like "the", "a", "is" and "and" completely.
+- `max_features=20000` keeps only the 20,000 most common words, which keeps the matrix a manageable size.
+
+| Word | Appears in how many plots? | IDF weight |
+|---|---|---|
+| "man" | very many | low |
+| "dream" | a few | high |
+| "subconscious" | very few | very high |
+
+So two plots that share "subconscious" will score as much more similar than two plots that share "man".
+
+### 3c. normalize
+
+```python
+self.features[col] = normalize(vec.fit_transform(self.df[col]))
+```
+
+`normalize` rescales each row so its **length is 1**. Length here means √(sum of squares).
+
+- Inception `[1,0,0,0,1,1]` has length √3 ≈ 1.732, so it becomes `[0.577, 0, 0, 0, 0.577, 0.577]`.
+- The Matrix `[1,0,0,0,1,0]` has length √2 ≈ 1.414, so it becomes `[0.707, 0, 0, 0, 0.707, 0]`.
+
+Section 4 explains why this matters. `TfidfVectorizer` already normalizes its output by default, which is why the code doesn't call `normalize` for the plot.
+
+---
+
+## 4. Cosine similarity: "how similar are two vectors?"
+
+Picture each vector as an arrow. **Cosine similarity** measures the angle between two arrows:
+
+- Same direction → **1.0** (identical).
+- At right angles → **0.0** (nothing in common).
+- All our numbers are ≥ 0, so it never goes below 0.
+
+Formula:
+```
+cosine(A, B) = (A · B) / (|A| × |B|)
+```
+- `A · B` (the **dot product**) multiplies matching positions and adds them up.
+- `|A|` is the length of A.
+
+**Example: Inception vs The Matrix (genres)**
+- Dot product: (1×1) + (1×1) + (1×0) = 2
+- Lengths: √3 × √2 = 2.449
+- Cosine = 2 / 2.449 = **0.816**, which is very similar.
+
+**Example: Inception vs Toy Story**
+- They share no genres, so the dot product is 0 and the cosine is **0**.
+
+### Why we normalize first
+
+If every vector already has length 1, the formula's bottom part becomes 1 × 1 = 1. **Cosine is then just the dot product.** Check with the normalized vectors:
+
+0.577 × 0.707 + 0.577 × 0.707 = **0.816**, the same answer.
+
+Dot products are extremely fast to compute in bulk, and that's exactly what the next section uses.
+
+### Why cosine and not plain distance?
+
+Cosine cares about *what* tags movies share, not *how many* they have. A movie with 2 genres and one with 4 genres can still score 1.0 if they point the same way. Plain distance would penalize the difference in counts.
+
+---
+
+## 5. NumPy: weighting, combining and ranking
+
+### 5a. Computing similarities on demand (`_sim_rows`)
+
+```python
+def _sim_rows(self, rows, weights):
+    total = 0
+    for col, w in weights.items():
+        M = self.features[col]
+        total = total + w * (M @ M[rows].T).toarray()
+    return total
+```
+
+Step by step:
+
+1. `M` is the feature matrix with shape **(4800 movies × vocabulary size)**.
+2. `M[rows]` keeps only the movies we care about, for example the 3 movies the user watched. Its shape is **(3 × vocab)**.
+3. `.T` is the **transpose**, which flips rows and columns: **(vocab × 3)**.
+4. `@` is **matrix multiplication**: (4800 × vocab) @ (vocab × 3) gives **(4800 × 3)**. Each cell is the dot product of one movie with one watched movie, which is their **cosine similarity** because the rows are normalized. In one line we get the similarity of every movie to each watched movie.
+5. `.toarray()` converts the sparse result into a normal NumPy array.
+6. `w * (...)` multiplies by that feature's weight (for example 0.35 for genres).
+7. `total = total + ...` adds up the four features.
+
+The result is a **(4800 × k)** table of combined similarity scores:
+
+```
+combined = 0.35·genre_sim + 0.30·actor_sim + 0.25·plot_sim + 0.10·director_sim
+```
+
+The weights add up to 1.0, so the combined score stays between 0 and 1. Multiplying by 100 gives the **match %**.
+
+**Why not precompute everything?** A full table of every movie against every movie would be 4800 × 4800 ≈ 23 million numbers per feature. Computing only the columns we need takes a fraction of a second and almost no memory.
+
+### 5b. Broadcasting (applying rating weights)
+
+```python
+sims = self._sim_rows(liked, weights) * np.array(liked_w)
+```
+
+`sims` has shape (4800 × 3) and `liked_w` might be `[1.0, 0.85, 0.8]`, which has shape (3,). NumPy **broadcasts**: it multiplies column 1 by 1.0, column 2 by 0.85, and column 3 by 0.8, with no loop needed.
+
+### 5c. Building the user profile with max
+
+```python
+profile = sims.max(axis=1)
+```
+
+`axis=1` means "across each row". For every movie, this takes its **best** score against any movie the user liked.
+
+We use max instead of the average because, if you watched *Inception* and *Toy Story*, a Nolan sci-fi film should still score highly. Averaging would cut its score in half just because it's nothing like Toy Story.
+
+### 5d. Picking the top results (`_package`)
+
+```python
+scores[list(exclude)] = -1
+top = np.argsort(-scores)[:n]
+```
+
+- Setting already-watched movies to −1 guarantees they never get recommended.
+- `np.argsort` returns the **positions** that would sort the array, not the values. Sorting `-scores` gives highest first, and `[:n]` keeps the top n.
+
+```python
+src = sources[int(np.argmax(source_sims[i]))]
+```
+
+`np.argmax` gives the position of the biggest value. Here it finds *which* watched movie this recommendation matched best, which is how we can say "Because you liked *Inception*".
+
+---
+
+## 6. Worked example: what happens when you open a movie page
+
+You open **Inception** with the "balanced" preset.
+
+1. Flask calls `recommender.similar_to(27205, "balanced")`.
+2. `self.idx[27205]` gives Inception's row number.
+3. `_sim_rows([i], weights)` computes Inception's similarity to every movie.
+4. Suppose two candidates score like this. The plot values are illustrative.
+
+| Feature (weight) | Interstellar | Shutter Island |
+|---|---|---|
+| Genres (0.35) | shares Sci-Fi → 0.333 | shares Thriller → 0.408 |
+| Actors (0.30) | none → 0 | shares DiCaprio → 0.2 |
+| Plot (0.25) | 0.08 | 0.05 |
+| Director (0.10) | Nolan → 1.0 | different → 0 |
+| **Combined** | 0.117 + 0 + 0.020 + 0.100 = **0.237** | 0.143 + 0.060 + 0.013 + 0 = **0.215** |
+| **Match** | **24%** | **22%** |
+
+5. Inception itself is set to −1, then `argsort` picks the top 5.
+6. `_reasons()` builds the tags you see, such as "Director: Christopher Nolan", "Genre: Sci-Fi" and "Actors: Leonardo Dicaprio".
+7. Flask passes the list to `movie.html`, and the `rec_list` macro draws the cards.
+
+**Why are match percentages fairly low?** It's normal. Two movies only hit 100% if they share *every* genre, actor, the director and the plot words. What matters is the **ranking**: the best matches are at the top.
+
+---
+
+## 7. How ratings, searches, dislikes and preferences change the score
+
+All of this happens in `for_user()`.
+
+| User action | Effect |
+|---|---|
+| Rated 5★ | Its similarities count fully (× 1.0) |
+| Rated 4★ | × 0.85 |
+| Rated 3★ | × 0.6 |
+| Watched, no rating | × 0.8 |
+| Recently searched (not watched) | × 0.7 |
+| Rated 1★ or 2★ | **Disliked**: similar movies get pushed down |
+
+The dislike penalty works like this:
+
+```python
+bad = self._sim_rows(disliked, weights).max(axis=1)
+profile = profile - DISLIKE_PENALTY * bad
+```
+
+If a movie is 0.5 similar to something you disliked, its score drops by 0.3 × 0.5 = 0.15.
+
+**Example:** you rated *Inception* 5★ and *Titanic* 1★.
+- *Interstellar*: 0.237 × 1.0 = 0.237, minus a small penalty (it's barely like Titanic), ends up around **23%**.
+- A romance drama: maybe 0.05 from Inception, minus a big Titanic penalty, goes **below 0**, so it isn't shown at all.
+
+**Preference presets** just swap the weights:
+
+| Preset | Genres | Actors | Plot | Director |
+|---|---|---|---|---|
+| balanced | 0.35 | 0.30 | 0.25 | 0.10 |
+| actors | 0.20 | **0.55** | 0.15 | 0.10 |
+| genres | **0.60** | 0.15 | 0.15 | 0.10 |
+| plot | 0.20 | 0.10 | **0.60** | 0.10 |
+| director | 0.20 | 0.15 | 0.15 | **0.50** |
+
+Choose "actors", and a shared DiCaprio suddenly counts almost twice as much, so his movies jump up the list.
+
+---
+
+## 8. `import_tmdb.py` explained
+
+The Kaggle CSV stores lists as **JSON text**. One cell of the `genres` column looks like:
+```
+[{"id": 28, "name": "Action"}, {"id": 878, "name": "Science Fiction"}]
+```
+
+`json.loads()` turns that text into a real Python list of dicts. Then:
+
+- `names()` keeps only the `"name"` values and joins them with `|`, giving `"Action|Science Fiction"`.
+- `top_cast()` sorts the cast by billing `"order"` (0 = lead actor) and keeps the first 5.
+- `director()` searches the crew list for the person whose `"job"` is `"Director"`.
+- `load_json()` uses try/except so a broken cell gives an empty list instead of crashing.
+
+Values are cleaned to fit the database: titles are cut to 200 characters, a missing date becomes `None` (stored as NULL), and so on. Rows are inserted **500 at a time** with `executemany`, which is far faster than 4,800 separate inserts.
+
+The TMDB id is reused as our `movies.id`, so ids match the real TMDB website.
+
+---
+
+## 9. Glossary
+
+| Term | Meaning |
+|---|---|
+| **Vector** | A list of numbers describing something, e.g. `[1, 0, 1]` |
+| **Matrix** | A table of numbers; here, one row per movie |
+| **Sparse matrix** | A matrix that stores only non-zero values to save memory |
+| **Vocabulary** | Every distinct tag or word found during `fit` |
+| **Tokenizer** | A function that splits text into pieces (tokens) |
+| **TF-IDF** | A word weight that is high when the word is frequent in this text but rare overall |
+| **Stop words** | Common words that are ignored ("the", "and", "is") |
+| **Normalize** | Rescale a vector to length 1 |
+| **Dot product** | Multiply matching positions and add them up |
+| **Cosine similarity** | How closely two vectors point the same way (0 to 1 here) |
+| **Transpose (`.T`)** | Flip a matrix's rows and columns |
+| **Broadcasting** | NumPy automatically applying an operation across rows or columns |
+| **argsort / argmax** | Return *positions* (indexes) rather than values |
+| **Content-based filtering** | Recommending items similar to ones the user liked, based on the items' features |
+
+## 10. Likely presentation questions
+
+**What type of recommender is this?**
+Content-based filtering. It recommends using the movies' own features (genres, cast, director, plot), not other users' behaviour.
+
+**What's the alternative?**
+Collaborative filtering: "users who liked X also liked Y". It needs lots of user data, which a new project doesn't have.
+
+**Why TF-IDF for plots instead of simple word counts?**
+Common words would dominate the counts. TF-IDF boosts rare, meaningful words like "wormhole" and downweights words like "man".
+
+**Why cosine similarity?**
+It compares direction, not size, so movies with different numbers of genres or plot lengths can still be compared fairly. It's also very fast once vectors are normalized.
+
+**How is match % calculated?**
+A weighted sum of four cosine similarities (genres, actors, plot, director), with weights adding to 1, multiplied by 100.
+
+**What is the cold-start problem, and how do you handle it?**
+A brand-new user has no history, so there's nothing to compare against. They see "No recommendations yet" until they search or watch something. Searches count as a weaker signal, so even one search produces recommendations.
+
+**How did you make it efficient?**
+- Sparse matrices for memory.
+- Normalized vectors, so similarity is just a dot product.
+- Only the needed similarity columns are computed instead of a 4800 × 4800 table.
+
+**Limitations?**
+- It can only recommend things similar to what you already like, so there are few surprises.
+- Plot similarity depends on the wording of the summary.
+- The weights were chosen by hand rather than learned from data.
+
+**How could it be improved?**
+- Combine it with collaborative filtering (a "hybrid" recommender).
+- Learn the weights from user ratings.
+- Use sentence embeddings for plots so meaning is matched, not just words.
