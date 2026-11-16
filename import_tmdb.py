@@ -5,8 +5,8 @@ import db
 
 MOVIES_CSV = "tmdb_5000_movies.csv"
 CREDITS_CSV = "tmdb_5000_credits.csv"
-TOP_ACTORS = 5        # how many billed actors to keep per movie
-LIMIT = None          # e.g. 1000 to import only the 1000 most popular movies
+TOP_ACTORS = 5        
+LIMIT = None          
 BATCH_SIZE = 500
 
 
@@ -41,7 +41,7 @@ def main():
     movies = pd.read_csv(MOVIES_CSV)
     credits = pd.read_csv(CREDITS_CSV)
 
-    # Join the two files on the movie id
+
     df = movies.merge(credits[["movie_id", "cast", "crew"]],
                       left_on="id", right_on="movie_id")
     df = df.sort_values("popularity", ascending=False)

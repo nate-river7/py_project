@@ -3,11 +3,11 @@ import db
 from recommender import Recommender, PRESETS
 
 app = Flask(__name__)
-app.secret_key = "change-this-secret"
+app.secret_key = "its_a_secret_shush"
 
 print("Building recommender...")
 recommender = Recommender(db.load_movies_df())
-print("Ready.")
+
 
 
 def current_pref():
@@ -116,8 +116,7 @@ def watch(movie_id):
         rating = request.form.get("rating", type=int)
         if rating not in (1, 2, 3, 4, 5):
             rating = None
-        # One row per user+movie: insert, or update if it already exists.
-        # COALESCE keeps the old rating if they re-mark it without choosing stars.
+            
         db.execute(
             """INSERT INTO watch_history (user_id, movie_id, rating) VALUES (%s, %s, %s)
                ON DUPLICATE KEY UPDATE rating = COALESCE(VALUES(rating), rating),

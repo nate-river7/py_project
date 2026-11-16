@@ -3,7 +3,7 @@ import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.preprocessing import normalize
 
-# "I care most about..." presets (each adds up to 1.0)
+
 PRESETS = {
     "balanced": {"genres": 0.35, "actors": 0.30, "plot": 0.25, "director": 0.10},
     "actors":   {"genres": 0.20, "actors": 0.55, "plot": 0.15, "director": 0.10},
@@ -16,12 +16,13 @@ RATING_WEIGHT = {5: 1.0, 4: 0.85, 3: 0.6}   # 1-2 stars = disliked
 UNRATED_WEIGHT = 0.8                         # watched but not rated
 SEARCH_WEIGHT = 0.7                          # searched but not watched
 DISLIKE_PENALTY = 0.3                        # how hard to push away disliked stuff
+POPULARITY_BOOST = 0.2                       # most popular movie gets up to +20%
 
 TEXT_COLS = ["title", "genres", "actors", "director", "plot", "keywords"]
 
 
 def split_pipe(text):
-    """'Action|Sci-Fi' -> ['action', 'sci-fi']"""
+    
     return [t.strip().lower() for t in text.split("|") if t.strip()]
 
 
@@ -39,8 +40,7 @@ class Recommender:
 
         self.idx = {int(mid): i for i, mid in enumerate(self.df["id"])}
 
-        # One sparse feature matrix per feature. Rows are normalized,
-        # so a plain dot product between two rows = cosine similarity.
+        
         self.features = {}
         for col in ("genres", "actors", "director"):
             vec = CountVectorizer(tokenizer=split_pipe, token_pattern=None, binary=True)
@@ -48,13 +48,16 @@ class Recommender:
 
         plot_text = self.df["plot"] + " " + self.df["keywords"].str.replace("|", " ")
         tfidf = TfidfVectorizer(stop_words="english", max_features=20000)
-        self.features["plot"] = tfidf.fit_transform(plot_text)   # already normalized
+        self.features["plot"] = tfidf.fit_transform(plot_text) 
 
-        # Pre-split tags, used for the "why" explanations
-        self.tags = {col: [set(split_pipe(v)) for v in self.df[col]]
+        self.tags = {col: [{t.strip().lower(): t.strip() for t in v.split("|") if t.strip()}
+                           for v in self.df[col]]
                      for col in ("genres", "actors")}
 
-    # ---------- similarity on demand ----------
+        pop = np.log1p(self.df["popularity"].astype(float).fillna(0).to_numpy())
+        self.pop = pop / pop.max() if pop.max() > 0 else pop
+
+
     def _sim_rows(self, rows, weights):
         """Similarity of EVERY movie to each movie in `rows`.
         Returns an array of shape (number_of_movies, len(rows))."""
@@ -64,26 +67,24 @@ class Recommender:
             total = total + w * (M @ M[rows].T).toarray()
         return total
 
-    # ---------- explanations ----------
+
+    def _shared(self, col, a, b):
+        """Names that movies a and b have in common, in their original spelling."""
+        common = self.tags[col][a].keys() & self.tags[col][b].keys()
+        return sorted(self.tags[col][b][k] for k in common)
+
     def _reasons(self, a, b):
         reasons = []
-        genres = self.tags["genres"][a] & self.tags["genres"][b]
+        genres = self._shared("genres", a, b)
         if genres:
-            reasons.append("Genre: " + ", ".join(sorted(genres)).title())
-        actors = self.tags["actors"][a] & self.tags["actors"][b]
+            reasons.append("Genre: " + ", ".join(genres))
+        actors = self._shared("actors", a, b)
         if actors:
-            reasons.append("Actors: " + ", ".join(sorted(actors)).title())
-        d = self.df.at[a, "director"]
-        if d and d == self.df.at[b, "director"]:
-            reasons.append("Director: " + d)
-        P = self.features["plot"]
-        if P[a].multiply(P[b]).sum() > 0.1:
-            reasons.append("Similar plot")
-        return reasons
+            reasons.append("Actors: " + ", ".join(actors))
 
-    # ---------- build the result list ----------
+
     def _package(self, scores, exclude, sources, source_sims, n, show_because):
-        scores = scores.astype(float).copy()
+        scores = scores.astype(float) * (1 + POPULARITY_BOOST * self.pop)
         if exclude:
             scores[list(exclude)] = -1
         top = np.argsort(-scores)[:n]
@@ -92,7 +93,7 @@ class Recommender:
         for i in top:
             if scores[i] <= 0:
                 break
-            src = sources[int(np.argmax(source_sims[i]))]   # which source matched best
+            src = sources[int(np.argmax(source_sims[i]))]
             row = self.df.iloc[i]
             results.append({
                 "id": int(row["id"]),
@@ -104,7 +105,7 @@ class Recommender:
             })
         return results
 
-    # ---------- public API ----------
+
     def similar_to(self, movie_id, preference="balanced", n=5):
         if movie_id not in self.idx:
             return []
@@ -138,7 +139,7 @@ class Recommender:
         if not liked:
             return []
 
-        # Each column = similarity to one liked movie, scaled by how much they liked it
+
         sims = self._sim_rows(liked, weights) * np.array(liked_w)
         profile = sims.max(axis=1)
 
