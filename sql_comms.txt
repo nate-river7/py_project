@@ -22,14 +22,14 @@ CREATE DATABASE movie_recs CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE movie_recs;
 
 CREATE TABLE movies (
-    id INT AUTO_INCREMENT PRIMARY KEY,   -- we reuse TMDB's id here
+    id INT AUTO_INCREMENT PRIMARY KEY,   
     title VARCHAR(200) NOT NULL,
     year INT,
-    genres VARCHAR(255),                 -- 'Action|Sci-Fi'
-    actors VARCHAR(500),                 -- top 5 billed actors
+    genres VARCHAR(255),
+    actors VARCHAR(500),
     director VARCHAR(200),
     plot TEXT,
-    keywords TEXT,                       -- 'dream|heist|subconscious'
+    keywords TEXT,
     popularity FLOAT DEFAULT 0
 );
 
