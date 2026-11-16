@@ -81,6 +81,13 @@ class Recommender:
         actors = self._shared("actors", a, b)
         if actors:
             reasons.append("Actors: " + ", ".join(actors))
+        d = self.df.at[a, "director"]
+        if d and d == self.df.at[b, "director"]:
+            reasons.append("Director: " + d)
+        P = self.features["plot"]
+        if P[a].multiply(P[b]).sum() > 0.1:
+            reasons.append("Similar plot")
+        return reasons
 
 
     def _package(self, scores, exclude, sources, source_sims, n, show_because):
